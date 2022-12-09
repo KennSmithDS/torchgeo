@@ -12,7 +12,7 @@ from torch.utils.data import Sampler
 
 from ..datasets import BoundingBox, GeoDataset
 from .constants import Units
-from .utils import _to_tuple, get_random_bounding_box
+from .utils import _to_tuple, get_random_bounding_box, tile_to_chips
 
 # https://github.com/pytorch/pytorch/issues/60979
 # https://github.com/pytorch/pytorch/pull/61045
@@ -62,7 +62,8 @@ class RandomGeoSampler(GeoSampler):
     """Samples elements from a region of interest randomly.
 
     This is particularly useful during training when you want to maximize the size of
-    the dataset and return as many random :term:`chips <chip>` as possible.
+    the dataset and return as many random :term:`chips <chip>` as possible. Note that
+    randomly sampled chips may overlap.
 
     This sampler is not recommended for use with tile-based datasets. Use
     :class:`RandomBatchGeoSampler` instead.
@@ -72,7 +73,7 @@ class RandomGeoSampler(GeoSampler):
         self,
         dataset: GeoDataset,
         size: Union[Tuple[float, float], float],
-        length: int,
+        length: Optional[int],
         roi: Optional[BoundingBox] = None,
         units: Units = Units.PIXELS,
     ) -> None:
@@ -89,12 +90,18 @@ class RandomGeoSampler(GeoSampler):
             dataset: dataset to index from
             size: dimensions of each :term:`patch`
             length: number of random samples to draw per epoch
+                (defaults to approximately the maximal number of non-overlapping
+                :term:`chips <chip>` of size ``size`` that could be sampled from
+                the dataset)
             roi: region of interest to sample from (minx, maxx, miny, maxy, mint, maxt)
                 (defaults to the bounds of ``dataset.index``)
             units: defines if ``size`` is in pixel or CRS units
 
         .. versionchanged:: 0.3
            Added ``units`` parameter, changed default to pixel units
+
+        .. versionchanged:: 0.4
+           ``length`` parameter is now optional, a reasonable default will be used
         """
         super().__init__(dataset, roi)
         self.size = _to_tuple(size)
@@ -102,7 +109,7 @@ class RandomGeoSampler(GeoSampler):
         if units == Units.PIXELS:
             self.size = (self.size[0] * self.res, self.size[1] * self.res)
 
-        self.length = length
+        self.length = 0
         self.hits = []
         areas = []
         for hit in self.index.intersection(tuple(self.roi), objects=True):
@@ -111,8 +118,15 @@ class RandomGeoSampler(GeoSampler):
                 bounds.maxx - bounds.minx >= self.size[1]
                 and bounds.maxy - bounds.miny >= self.size[0]
             ):
+                if bounds.area > 0:
+                    rows, cols = tile_to_chips(bounds, self.size)
+                    self.length += rows * cols
+                else:
+                    self.length += 1
                 self.hits.append(hit)
                 areas.append(bounds.area)
+        if length is not None:
+            self.length = length
 
         # torch.multinomial requires float probabilities > 0
         self.areas = torch.tensor(areas, dtype=torch.float)
@@ -158,6 +172,9 @@ class GridGeoSampler(GeoSampler):
     The overlap between each chip (``chip_size - stride``) should be approximately equal
     to the `receptive field <https://distill.pub/2019/computing-receptive-fields/>`_ of
     the CNN.
+
+    Note that the stride of the final set of chips in each row/column may be adjusted so
+    that the entire :term:`tile` is sampled without exceeding the bounds of the dataset.
     """
 
     def __init__(
@@ -200,17 +217,15 @@ class GridGeoSampler(GeoSampler):
         for hit in self.index.intersection(tuple(self.roi), objects=True):
             bounds = BoundingBox(*hit.bounds)
             if (
-                bounds.maxx - bounds.minx > self.size[1]
-                and bounds.maxy - bounds.miny > self.size[0]
+                bounds.maxx - bounds.minx >= self.size[1]
+                and bounds.maxy - bounds.miny >= self.size[0]
             ):
                 self.hits.append(hit)
 
-        self.length: int = 0
+        self.length = 0
         for hit in self.hits:
             bounds = BoundingBox(*hit.bounds)
-
-            rows = int((bounds.maxy - bounds.miny - self.size[0]) // self.stride[0]) + 1
-            cols = int((bounds.maxx - bounds.minx - self.size[1]) // self.stride[1]) + 1
+            rows, cols = tile_to_chips(bounds, self.size, self.stride)
             self.length += rows * cols
 
     def __iter__(self) -> Iterator[BoundingBox]:
@@ -222,10 +237,7 @@ class GridGeoSampler(GeoSampler):
         # For each tile...
         for hit in self.hits:
             bounds = BoundingBox(*hit.bounds)
-
-            rows = int((bounds.maxy - bounds.miny - self.size[0]) // self.stride[0]) + 1
-            cols = int((bounds.maxx - bounds.minx - self.size[1]) // self.stride[1]) + 1
-
+            rows, cols = tile_to_chips(bounds, self.size, self.stride)
             mint = bounds.mint
             maxt = bounds.maxt
 
@@ -233,11 +245,17 @@ class GridGeoSampler(GeoSampler):
             for i in range(rows):
                 miny = bounds.miny + i * self.stride[0]
                 maxy = miny + self.size[0]
+                if maxy > bounds.maxy:
+                    maxy = bounds.maxy
+                    miny = bounds.maxy - self.size[0]
 
                 # For each column...
                 for j in range(cols):
                     minx = bounds.minx + j * self.stride[1]
                     maxx = minx + self.size[1]
+                    if maxx > bounds.maxx:
+                        maxx = bounds.maxx
+                        minx = bounds.maxx - self.size[1]
 
                     yield BoundingBox(minx, maxx, miny, maxy, mint, maxt)
 

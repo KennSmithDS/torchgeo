@@ -8,7 +8,7 @@ import pytest
 from omegaconf import OmegaConf
 from pytorch_lightning import LightningDataModule, Trainer
 
-from torchgeo.datamodules import COWCCountingDataModule, CycloneDataModule
+from torchgeo.datamodules import COWCCountingDataModule, TropicalCycloneDataModule
 from torchgeo.trainers import RegressionTask
 
 from .test_utils import RegressionTestModel
@@ -17,7 +17,10 @@ from .test_utils import RegressionTestModel
 class TestRegressionTask:
     @pytest.mark.parametrize(
         "name,classname",
-        [("cowc_counting", COWCCountingDataModule), ("cyclone", CycloneDataModule)],
+        [
+            ("cowc_counting", COWCCountingDataModule),
+            ("cyclone", TropicalCycloneDataModule),
+        ],
     )
     def test_trainer(self, name: str, classname: Type[LightningDataModule]) -> None:
         conf = OmegaConf.load(os.path.join("tests", "conf", name + ".yaml"))
@@ -38,6 +41,7 @@ class TestRegressionTask:
         trainer = Trainer(fast_dev_run=True, log_every_n_steps=1, max_epochs=1)
         trainer.fit(model=model, datamodule=datamodule)
         trainer.test(model=model, datamodule=datamodule)
+        trainer.predict(model=model, dataloaders=datamodule.val_dataloader())
 
     def test_no_logger(self) -> None:
         conf = OmegaConf.load(os.path.join("tests", "conf", "cyclone.yaml"))
@@ -46,7 +50,7 @@ class TestRegressionTask:
 
         # Instantiate datamodule
         datamodule_kwargs = conf_dict["datamodule"]
-        datamodule = CycloneDataModule(**datamodule_kwargs)
+        datamodule = TropicalCycloneDataModule(**datamodule_kwargs)
 
         # Instantiate model
         model_kwargs = conf_dict["module"]
@@ -58,7 +62,37 @@ class TestRegressionTask:
         )
         trainer.fit(model=model, datamodule=datamodule)
 
-    def test_invalid_model(self) -> None:
-        match = "module 'torchvision.models' has no attribute 'invalid_model'"
-        with pytest.raises(AttributeError, match=match):
-            RegressionTask(model="invalid_model", pretrained=False)
+    @pytest.fixture
+    def model_kwargs(self) -> Dict[Any, Any]:
+        return {
+            "model": "resnet18",
+            "weights": "random",
+            "num_outputs": 1,
+            "in_channels": 3,
+        }
+
+    def test_invalid_pretrained(
+        self, model_kwargs: Dict[Any, Any], checkpoint: str
+    ) -> None:
+        model_kwargs["weights"] = checkpoint
+        model_kwargs["model"] = "resnet50"
+        match = "Trying to load resnet18 weights into a resnet50"
+        with pytest.raises(ValueError, match=match):
+            RegressionTask(**model_kwargs)
+
+    def test_pretrained(self, model_kwargs: Dict[Any, Any], checkpoint: str) -> None:
+        model_kwargs["weights"] = checkpoint
+        with pytest.warns(UserWarning):
+            RegressionTask(**model_kwargs)
+
+    def test_invalid_model(self, model_kwargs: Dict[Any, Any]) -> None:
+        model_kwargs["model"] = "invalid_model"
+        match = "Model type 'invalid_model' is not a valid timm model."
+        with pytest.raises(ValueError, match=match):
+            RegressionTask(**model_kwargs)
+
+    def test_invalid_weights(self, model_kwargs: Dict[Any, Any]) -> None:
+        model_kwargs["weights"] = "invalid_weights"
+        match = "Weight type 'invalid_weights' is not valid."
+        with pytest.raises(ValueError, match=match):
+            RegressionTask(**model_kwargs)

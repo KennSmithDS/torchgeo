@@ -78,6 +78,7 @@ class TestSemanticSegmentationTask:
         trainer = Trainer(fast_dev_run=True, log_every_n_steps=1, max_epochs=1)
         trainer.fit(model=model, datamodule=datamodule)
         trainer.test(model=model, datamodule=datamodule)
+        trainer.predict(model=model, dataloaders=datamodule.val_dataloader())
 
     def test_no_logger(self) -> None:
         conf = OmegaConf.load(os.path.join("tests", "conf", "landcoverai.yaml"))
@@ -104,8 +105,8 @@ class TestSemanticSegmentationTask:
             "segmentation_model": "unet",
             "encoder_name": "resnet18",
             "encoder_weights": None,
-            "in_channels": 1,
-            "num_classes": 2,
+            "in_channels": 3,
+            "num_classes": 6,
             "loss": "ce",
             "ignore_index": 0,
         }
@@ -134,3 +135,14 @@ class TestSemanticSegmentationTask:
         match = "ignore_index has no effect on training when loss='jaccard'"
         with pytest.warns(UserWarning, match=match):
             SemanticSegmentationTask(**model_kwargs)
+
+    def test_missing_attributes(
+        self, model_kwargs: Dict[Any, Any], monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.delattr(LandCoverAIDataModule, "plot")
+        datamodule = LandCoverAIDataModule(
+            root="tests/data/landcoverai", batch_size=1, num_workers=0
+        )
+        model = SemanticSegmentationTask(**model_kwargs)
+        trainer = Trainer(fast_dev_run=True, log_every_n_steps=1, max_epochs=1)
+        trainer.validate(model=model, datamodule=datamodule)

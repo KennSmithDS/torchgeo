@@ -7,7 +7,7 @@ import glob
 import json
 import os
 import sys
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, cast
 
 import fiona
 import fiona.transform
@@ -307,7 +307,7 @@ class OpenBuildings(VectorDataset):
             IndexError: if query is not found in the index
         """
         hits = self.index.intersection(tuple(query), objects=True)
-        filepaths = [hit.object for hit in hits]
+        filepaths = cast(List[str], [hit.object for hit in hits])
 
         if not filepaths:
             raise IndexError(
@@ -324,11 +324,11 @@ class OpenBuildings(VectorDataset):
         )
         if shapes:
             masks = rasterio.features.rasterize(
-                shapes, out_shape=(int(height), int(width)), transform=transform
+                shapes, out_shape=(round(height), round(width)), transform=transform
             )
             masks = torch.tensor(masks).unsqueeze(0)
         else:
-            masks = torch.zeros(size=(1, int(height), int(width)))
+            masks = torch.zeros(size=(1, round(height), round(width)))
 
         sample = {"mask": masks, "crs": self.crs, "bbox": query}
 
